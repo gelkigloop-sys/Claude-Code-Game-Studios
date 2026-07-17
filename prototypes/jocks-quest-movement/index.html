@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Jock's Quest — Movement Prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; height: 100%;
+    background: #16110d;
+    display: flex; align-items: center; justify-content: center;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  h1 { color: #f2e6c9; font-size: 1.1rem; letter-spacing: 0.06em; margin: 6px 0 0; text-transform: uppercase; }
+  .sub { color: #8a7a63; font-size: 0.75rem; margin-bottom: 4px; }
+  canvas {
+    background: #7fb8d8;
+    border: 3px solid #3a2c1c;
+    border-radius: 6px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    image-rendering: pixelated;
+    max-width: 96vw;
+    height: auto;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Jock's Quest — Movement Prototype</h1>
+  <div class="sub">placeholder shapes only — this build tests movement feel, not art</div>
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // ---------- Tunables ----------
+  const GRAVITY = 0.62;
+  const MAX_FALL = 15;
+  const MOVE_ACCEL = 0.55;
+  const MOVE_MAX = 4.6;
+  const GROUND_FRICTION = 0.80;
+  const AIR_FRICTION = 0.95;
+  const JUMP_VELOCITY = -11.6;
+  const COYOTE_FRAMES = 7;
+  const SLIDE_MIN_SPEED = 2.4;
+  const SLIDE_BOOST = 1.35;
+  const BENJI_DELAY_FRAMES = 42;
+  const BENJI_CATCHUP = 1.18;
+
+  const LEVEL_WIDTH = 3200;
+  const GROUND_BASE = 400;
+
+  function groundY(x) {
+    return GROUND_BASE + Math.sin(x * 0.0035) * 22 + Math.sin(x * 0.011 + 1.3) * 10;
+  }
+
+  const platforms = [
+    { x1: 520,  x2: 650,  y: 300 },
+    { x1: 900,  x2: 1010, y: 330 },
+    { x1: 1460, x2: 1610, y: 275 },
+    { x1: 2110, x2: 2270, y: 320 },
+    { x1: 2650, x2: 2760, y: 290 },
+  ];
+
+  const treeX = [];
+  for (let x = 40; x < LEVEL_WIDTH; x += 90 + (x * 7 % 60)) treeX.push(x);
+
+  const quips = [
+    "Jock: \"For science. Definitely science.\"",
+    "Jock: \"Evidence. The mountain owes me evidence.\"",
+    "Jock: \"Don't tell Benji I ate one of these once.\"",
+    "Jock: \"Another clue. Probably.\"",
+    "Jock: \"This one's got a face. I'm not looking at it.\"",
+    "Jock: \"Mushroom hunters won't know what hit 'em.\"",
+  ];
+
+  function makeMushrooms() {
+    const list = [];
+    const spots = [
+      [300, 'ground'], [470, 'ground'], [585, 'plat0'],
+      [780, 'ground'], [950, 'plat1'], [1230, 'ground'],
+      [1535, 'plat2'], [1750, 'ground'], [1980, 'ground'],
+      [2190, 'plat3'], [2450, 'ground'], [2705, 'plat4'],
+      [2950, 'ground'],
+    ];
+    spots.forEach(([x, on]) => {
+      let y;
+      if (on === 'ground') y = groundY(x) - 14;
+      else {
+        const p = platforms[Number(on.slice(4))];
+        y = p.y - 14;
+      }
+      list.push({ x, y, collected: false, bob: Math.random() * Math.PI * 2 });
+    });
+    return list;
+  }
+  const mushrooms = makeMushrooms();
+  let mushroomsFound = 0;
+
+  const campX = LEVEL_WIDTH - 190;
+  let reachedCamp = false;
+
+  // ---------- Entities ----------
+  function makeEntity(x) {
+    return {
+      x, y: groundY(x) - 46, vx: 0, vy: 0,
+      w: 26, h: 46, onGround: false, facing: 1,
+      coyote: 0, animT: 0, sliding: false,
+    };
+  }
+  const jock = makeEntity(80);
+  const benji = { x: 40, y: groundY(40) - 20, vx: 0, vy: 0, w: 30, h: 20, onGround: false, animT: 0, wag: 0 };
+
+  const jockHistory = [];
+
+  function landOn(entity, feetTargetY) {
+    entity.y = feetTargetY - entity.h;
+    entity.vy = 0;
+    entity.onGround = true;
+  }
+
+  function resolveVertical(entity) {
+    const cx = entity.x + entity.w / 2;
+    const floor = groundY(cx);
+    let bestPlatformY = null;
+    for (const p of platforms) {
+      if (cx > p.x1 && cx < p.x2) {
+        const prevFeet = entity.y + entity.h - entity.vy;
+        const feet = entity.y + entity.h;
+        if (entity.vy >= 0 && prevFeet <= p.y + 1 && feet >= p.y && p.y < floor) {
+          if (bestPlatformY === null || p.y < bestPlatformY) bestPlatformY = p.y;
+        }
+      }
+    }
+    const target = bestPlatformY !== null ? bestPlatformY : floor;
+    const feet = entity.y + entity.h;
+    if (feet >= target && entity.vy >= 0) {
+      landOn(entity, target);
+    } else {
+      entity.onGround = false;
+    }
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  let controlsFade = 1;
+  let anyInput = false;
+
+  function updateJock() {
+    const left = keys['ArrowLeft'] || keys['KeyA'];
+    const right = keys['ArrowRight'] || keys['KeyD'];
+    const down = keys['ArrowDown'] || keys['KeyS'];
+    const jumpPressed = keys['Space'] || keys['ArrowUp'] || keys['KeyW'];
+
+    if (left || right || down || jumpPressed) anyInput = true;
+
+    let dir = 0;
+    if (left) dir -= 1;
+    if (right) dir += 1;
+    if (dir !== 0) jock.facing = dir;
+
+    jock.sliding = down && jock.onGround && Math.abs(jock.vx) > SLIDE_MIN_SPEED;
+
+    if (jock.sliding) {
+      jock.vx *= 0.985;
+    } else if (dir !== 0) {
+      jock.vx += dir * MOVE_ACCEL;
+      jock.vx = Math.max(-MOVE_MAX, Math.min(MOVE_MAX, jock.vx));
+    } else {
+      jock.vx *= jock.onGround ? GROUND_FRICTION : AIR_FRICTION;
+      if (Math.abs(jock.vx) < 0.05) jock.vx = 0;
+    }
+
+    if (jock.onGround) jock.coyote = COYOTE_FRAMES;
+    else jock.coyote = Math.max(0, jock.coyote - 1);
+
+    let didJump = false;
+    if (jumpPressed && jock.coyote > 0 && jock.vy >= -0.1) {
+      jock.vy = jock.sliding ? JUMP_VELOCITY * 0.85 : JUMP_VELOCITY;
+      jock.coyote = 0;
+      jock.onGround = false;
+      didJump = true;
+      if (jock.sliding) jock.vx *= SLIDE_BOOST;
+    }
+
+    jock.vy = Math.min(MAX_FALL, jock.vy + GRAVITY);
+    jock.x += jock.vx;
+    jock.y += jock.vy;
+    jock.x = Math.max(10, Math.min(LEVEL_WIDTH - 40, jock.x));
+
+    resolveVertical(jock);
+    jock.animT += Math.abs(jock.vx) * 0.18 + (jock.onGround ? 0 : 0);
+
+    jockHistory.push({ x: jock.x, y: jock.y, jumped: didJump });
+    if (jockHistory.length > 900) jockHistory.shift();
+
+    // mushroom pickups
+    for (const m of mushrooms) {
+      if (m.collected) continue;
+      const dx = (jock.x + jock.w / 2) - m.x;
+      const dy = (jock.y + jock.h / 2) - m.y;
+      if (Math.hypot(dx, dy) < 30) {
+        m.collected = true;
+        mushroomsFound++;
+        showQuip(quips[Math.floor(Math.random() * quips.length)]);
+      }
+    }
+
+    if (!reachedCamp && jock.x + jock.w / 2 > campX) {
+      reachedCamp = true;
+      showQuip("Jock: \"Home. The mountain hasn't won yet.\"", 4200);
+    }
+  }
+
+  function updateBenji() {
+    const idx = jockHistory.length - BENJI_DELAY_FRAMES;
+    const target = idx >= 0 ? jockHistory[idx] : { x: jock.x - 70, y: jock.y, jumped: false };
+
+    const dx = target.x - benji.x;
+    benji.vx += Math.sign(dx) * 0.5;
+    const maxSpeed = MOVE_MAX * BENJI_CATCHUP;
+    benji.vx = Math.max(-maxSpeed, Math.min(maxSpeed, benji.vx));
+    if (Math.abs(dx) < 4) benji.vx *= 0.7;
+
+    if (target.jumped && benji.onGround && Math.abs(dx) < 140) {
+      benji.vy = JUMP_VELOCITY * 0.9;
+      benji.onGround = false;
+    }
+
+    benji.vy = Math.min(MAX_FALL, benji.vy + GRAVITY);
+    benji.x += benji.vx;
+    benji.y += benji.vy;
+    benji.x = Math.max(0, Math.min(LEVEL_WIDTH - 30, benji.x));
+
+    resolveVertical(benji);
+    benji.animT += Math.abs(benji.vx) * 0.22;
+    benji.wag += 0.15;
+  }
+
+  // ---------- Quip UI ----------
+  let quipText = '';
+  let quipTimer = 0;
+  function showQuip(text, ms = 2600) {
+    quipText = text;
+    quipTimer = ms;
+  }
+
+  // ---------- Camera ----------
+  let camX = 0;
+  function updateCamera() {
+    const targetCam = jock.x - W / 2 + jock.w / 2;
+    camX += (targetCam - camX) * 0.12;
+    camX = Math.max(0, Math.min(LEVEL_WIDTH - W, camX));
+  }
+
+  // ---------- Drawing ----------
+  function drawSky() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#6fa9d6');
+    g.addColorStop(0.55, '#a9cfe0');
+    g.addColorStop(1, '#e8d7a8');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = 'rgba(255, 244, 214, 0.55)';
+    ctx.beginPath();
+    ctx.arc(W * 0.78, H * 0.22, 46, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawMountains(offsetFactor, color, baseY, amp) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    const off = camX * offsetFactor;
+    for (let x = -50; x <= W + 50; x += 40) {
+      const wx = x + off;
+      const y = baseY - Math.abs(Math.sin(wx * 0.004)) * amp - Math.abs(Math.sin(wx * 0.0017 + 2)) * amp * 0.6;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawTree(worldX, groundYAtX) {
+    const sx = worldX - camX;
+    if (sx < -40 || sx > W + 40) return;
+    const baseY = groundYAtX;
+    ctx.fillStyle = '#5b3a24';
+    ctx.fillRect(sx - 3, baseY - 18, 6, 18);
+    ctx.fillStyle = '#2e5b34';
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      const w = 26 - i * 6, yy = baseY - 14 - i * 14;
+      ctx.moveTo(sx, yy - 22);
+      ctx.lineTo(sx - w / 2, yy);
+      ctx.lineTo(sx + w / 2, yy);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function drawGround() {
+    ctx.fillStyle = '#3f6b2f';
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let sx = 0; sx <= W; sx += 8) {
+      ctx.lineTo(sx, groundY(sx + camX) - camX * 0);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#274a1e';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    for (let sx = 0; sx <= W; sx += 8) {
+      const y = groundY(sx + camX);
+      if (sx === 0) ctx.moveTo(sx, y); else ctx.lineTo(sx, y);
+    }
+    ctx.stroke();
+  }
+
+  function drawPlatforms() {
+    for (const p of platforms) {
+      const sx1 = p.x1 - camX, sx2 = p.x2 - camX;
+      if (sx2 < -20 || sx1 > W + 20) continue;
+      ctx.fillStyle = '#6b4a2e';
+      ctx.fillRect(sx1, p.y, sx2 - sx1, 14);
+      ctx.fillStyle = '#8a6a44';
+      ctx.fillRect(sx1, p.y, sx2 - sx1, 4);
+    }
+  }
+
+  function drawMushroom(m) {
+    const sx = m.x - camX;
+    if (sx < -20 || sx > W + 20 || m.collected) return;
+    const bobY = m.y + Math.sin(m.bob + performance.now() * 0.004) * 3;
+    ctx.fillStyle = '#e9dcb8';
+    ctx.fillRect(sx - 2, bobY, 4, 10);
+    ctx.fillStyle = '#c0392b';
+    ctx.beginPath();
+    ctx.ellipse(sx, bobY - 2, 9, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f4ece0';
+    ctx.beginPath();
+    ctx.arc(sx - 3, bobY - 3, 1.4, 0, Math.PI * 2);
+    ctx.arc(sx + 3, bobY - 2, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawCamp() {
+    const sx = campX - camX;
+    if (sx < -80 || sx > W + 80) return;
+    const gy = groundY(campX);
+    ctx.fillStyle = '#8a6a44';
+    ctx.fillRect(sx - 2, gy - 40, 4, 40);
+    ctx.fillStyle = '#c9a24a';
+    ctx.beginPath();
+    ctx.moveTo(sx - 34, gy);
+    ctx.lineTo(sx, gy - 40);
+    ctx.lineTo(sx + 34, gy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#7a5230';
+    ctx.beginPath();
+    ctx.moveTo(sx - 10, gy);
+    ctx.lineTo(sx, gy - 40);
+    ctx.lineTo(sx + 10, gy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#f2e6c9';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('CAMP', sx, gy + 16);
+  }
+
+  function drawJock() {
+    const sx = jock.x - camX;
+    const sy = jock.y;
+    const bodyH = jock.sliding ? jock.h * 0.55 : jock.h;
+    const legPhase = Math.sin(jock.animT);
+    const walking = Math.abs(jock.vx) > 0.3 && jock.onGround;
+
+    ctx.save();
+    ctx.translate(sx + jock.w / 2, sy + (jock.h - bodyH));
+    ctx.scale(jock.facing, 1);
+
+    // legs
+    ctx.strokeStyle = '#243447';
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    const legSwing = walking ? legPhase * 8 : 0;
+    ctx.beginPath();
+    ctx.moveTo(-5, bodyH * 0.55);
+    ctx.lineTo(-5 + legSwing, bodyH);
+    ctx.moveTo(5, bodyH * 0.55);
+    ctx.lineTo(5 - legSwing, bodyH);
+    ctx.stroke();
+
+    // boots
+    ctx.fillStyle = '#4a2f1a';
+    ctx.fillRect(-9 + legSwing, bodyH - 4, 8, 5);
+    ctx.fillRect(1 - legSwing, bodyH - 4, 8, 5);
+
+    // body (flannel)
+    ctx.fillStyle = '#8c2f2f';
+    ctx.fillRect(-11, bodyH * 0.08, 22, bodyH * 0.5);
+    ctx.strokeStyle = '#3a2418';
+    ctx.lineWidth = 1.5;
+    for (let i = -8; i <= 8; i += 6) {
+      ctx.beginPath();
+      ctx.moveTo(i, bodyH * 0.08);
+      ctx.lineTo(i, bodyH * 0.58);
+      ctx.stroke();
+    }
+
+    // arms
+    const armSwing = walking ? -legPhase * 7 : (jock.onGround ? 0 : -6);
+    ctx.strokeStyle = '#8c2f2f';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(-10, bodyH * 0.16);
+    ctx.lineTo(-10 - armSwing * 0.4, bodyH * 0.42 + armSwing);
+    ctx.moveTo(10, bodyH * 0.16);
+    ctx.lineTo(10 + armSwing * 0.4, bodyH * 0.42 - armSwing);
+    ctx.stroke();
+
+    // head
+    ctx.fillStyle = '#d8a97a';
+    ctx.beginPath();
+    ctx.arc(0, -6, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // hair
+    ctx.fillStyle = '#4a3320';
+    ctx.beginPath();
+    ctx.arc(0, -9, 8.5, Math.PI, Math.PI * 2.05);
+    ctx.fill();
+    ctx.fillRect(-9, -10, 4, 16);
+    ctx.fillRect(5, -10, 4, 16);
+
+    // irritated eyebrow + eye
+    ctx.strokeStyle = '#2b1c10';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(1, -8.5);
+    ctx.lineTo(6, -7);
+    ctx.stroke();
+    ctx.fillStyle = '#2b1c10';
+    ctx.fillRect(4, -6, 2, 2);
+
+    ctx.restore();
+  }
+
+  function drawBenji() {
+    const sx = benji.x - camX;
+    const sy = benji.y;
+    const trot = Math.sin(benji.animT);
+    const facing = benji.vx >= -0.05 ? 1 : -1;
+
+    ctx.save();
+    ctx.translate(sx + benji.w / 2, sy + benji.h / 2);
+    ctx.scale(facing, 1);
+
+    // legs
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = 3.5;
+    ctx.lineCap = 'round';
+    const swing = Math.abs(benji.vx) > 0.3 ? trot * 5 : 0;
+    ctx.beginPath();
+    ctx.moveTo(-9, 6); ctx.lineTo(-9 + swing, 11);
+    ctx.moveTo(9, 6); ctx.lineTo(9 - swing, 11);
+    ctx.stroke();
+
+    // body
+    ctx.fillStyle = '#161616';
+    ctx.beginPath();
+    ctx.ellipse(0, 2, 15, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // tail (wag)
+    ctx.strokeStyle = '#161616';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(-14, -1);
+    ctx.quadraticCurveTo(-20, -6 + Math.sin(benji.wag) * 4, -17, -12);
+    ctx.stroke();
+
+    // head
+    ctx.fillStyle = '#1c1c1c';
+    ctx.beginPath();
+    ctx.ellipse(14, -3, 7, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // ear
+    ctx.beginPath();
+    ctx.moveTo(11, -8);
+    ctx.lineTo(8, -14);
+    ctx.lineTo(15, -9);
+    ctx.closePath();
+    ctx.fill();
+    // snout + nose
+    ctx.fillStyle = '#1c1c1c';
+    ctx.fillRect(18, -3, 6, 4);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(23, -2, 2, 2);
+
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(10, 10, 150, 26);
+    ctx.fillStyle = '#f2e6c9';
+    ctx.fillText(`🍄 ${mushroomsFound} / ${mushrooms.length}`, 20, 28);
+
+    if (controlsFade > 0) {
+      ctx.globalAlpha = controlsFade;
+      ctx.textAlign = 'center';
+      ctx.font = '13px sans-serif';
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fillRect(W / 2 - 190, H - 40, 380, 28);
+      ctx.fillStyle = '#f2e6c9';
+      ctx.fillText('← → / A D move   ·   SPACE jump   ·   ↓ / S slide   ·   R reset', W / 2, H - 21);
+      ctx.globalAlpha = 1;
+      if (anyInput) controlsFade -= 0.02;
+    }
+
+    if (quipTimer > 0) {
+      quipTimer -= 16.7;
+      const sx = jock.x - camX;
+      ctx.globalAlpha = Math.min(1, quipTimer / 400);
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      const textW = ctx.measureText(quipText).width;
+      ctx.fillStyle = 'rgba(20,14,8,0.75)';
+      ctx.fillRect(sx - textW / 2 - 8, jock.y - 46, textW + 16, 22);
+      ctx.fillStyle = '#f2e6c9';
+      ctx.fillText(quipText, sx, jock.y - 30);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function resetLevel() {
+    jock.x = 80; jock.y = groundY(80) - jock.h; jock.vx = 0; jock.vy = 0;
+    benji.x = 40; benji.y = groundY(40) - benji.h; benji.vx = 0; benji.vy = 0;
+    jockHistory.length = 0;
+    mushrooms.forEach(m => m.collected = false);
+    mushroomsFound = 0;
+    reachedCamp = false;
+    camX = 0;
+  }
+
+  window.addEventListener('keydown', e => { if (e.code === 'KeyR') resetLevel(); });
+
+  function loop() {
+    updateJock();
+    updateBenji();
+    updateCamera();
+
+    drawSky();
+    drawMountains(0.15, '#5f83a3', H * 0.62, 60);
+    drawMountains(0.32, '#4a6d8c', H * 0.7, 80);
+    for (const tx of treeX) drawTree(tx, groundY(tx));
+    drawGround();
+    drawPlatforms();
+    for (const m of mushrooms) drawMushroom(m);
+    drawCamp();
+    drawBenji();
+    drawJock();
+    drawHUD();
+
+    requestAnimationFrame(loop);
+  }
+
+  loop();
+})();
+</script>
+</body>
+</html>
