@@ -26,6 +26,25 @@ Also: 3 hearts + checkpoints, 18 mushrooms (16 placed + 2 buried), golden
 mushroom boss reward, title/end screens with run stats, screen shake,
 particles, parallax painterly environment, day-warm palette.
 
+### v2 — visual + audio overhaul
+
+- **Regional color grading**: the palette lerps across the level — morning
+  camp → deep forest → golden-hour gate → cool tense chase → sunset arena.
+- Layered ridgelines with atmospheric haze, drifting mist bands, god rays,
+  sky birds, drifting golden spores, soft contact shadows under everything.
+- Multi-tone shaded tree canopies (pines + gums), grass blades, wildflowers,
+  rocks, ground gradients, water with depth/specular/foam, rope bough.
+- Character upgrades: Jock squash/stretch + run lean + blink + shading;
+  Benji floppy ear, running tongue, gloss coat; polish on all NPCs.
+- **Ambient soundscape**: wind bed, bird chirps, kookaburra-ish laugh, creek
+  babble, campfire crackle; sparse pentatonic plucks (explore), drum kit
+  (chase), goofy bass groove (boss).
+- **Voice system v2**: story clips stay one-shot; generic clips re-arm on
+  60-90s cooldowns and fire from more moments (hurt, chase start, boss
+  stuns, checkpoints, digs, pickups) with a global anti-spam gap.
+- Verified with live Chromium screenshots (fixed an rgb/hex parser crash
+  and a floating rope anchor found this way) + full headless replay suite.
+
 ## How to Run
 
 Open `index.html` in any browser — fully self-contained (voice audio is
